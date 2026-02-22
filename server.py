@@ -9,6 +9,7 @@ from protocol import *
 HOST = '0.0.0.0'
 PORT = 8080
 TIMEOUT = 2.0  # seconds
+SERVER_DIR = 'server_data'
 
 class UDPServer:
     def __init__(self, host, port):
@@ -18,6 +19,10 @@ class UDPServer:
         self.sock.bind((self.host, self.port))
         self.sock.settimeout(TIMEOUT)
         print(f"[*] Server listening on {self.host}:{self.port}")
+        
+        if not os.path.exists(SERVER_DIR):
+            os.makedirs(SERVER_DIR)
+        print(f"[*] Operating directory: '{SERVER_DIR}/'")
         
         # State tracking per session
         self.sessions = {} # session_id -> { 'state', 'seq_num', 'file_obj', 'expected_seq' }
@@ -75,18 +80,22 @@ class UDPServer:
 
         session_id = packet.session_id
         
+        # Secure the filename against directory traversal attacks
+        secure_filename = os.path.basename(filename)
+        filepath = os.path.join(SERVER_DIR, secure_filename)
+        
         # Initialize session state based on operation
         if op == "DOWNLOAD":
-            if not os.path.exists(filename):
+            if not os.path.exists(filepath):
                 self.send_error(session_id, addr, packet.seq_num + 1, b"File not found")
                 return
             
-            print(f"[*] Starting DOWNLOAD for {filename}, Session: {session_id}")
+            print(f"[*] Starting DOWNLOAD for {secure_filename}, Session: {session_id}")
             self.sessions[session_id] = {
                 'addr': addr,
                 'state': 'TRANSFERRING',
                 'op': 'DOWNLOAD',
-                'file_obj': open(filename, 'rb'),
+                'file_obj': open(filepath, 'rb'),
                 'seq_num': packet.seq_num + 1,  # Server's seq number
                 'last_acked_seq': packet.seq_num,
                 'unacked_packet': None,
@@ -101,12 +110,12 @@ class UDPServer:
             self.send_next_data(session_id)
             
         elif op == "UPLOAD":
-            print(f"[*] Starting UPLOAD for {filename}, Session: {session_id}")
+            print(f"[*] Starting UPLOAD for {secure_filename}, Session: {session_id}")
             self.sessions[session_id] = {
                 'addr': addr,
                 'state': 'TRANSFERRING',
                 'op': 'UPLOAD',
-                'file_obj': open(filename, 'wb'),
+                'file_obj': open(filepath, 'wb'),
                 'expected_seq': packet.seq_num + 1,
             }
             # Send SYN-ACK
