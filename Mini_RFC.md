@@ -77,7 +77,7 @@ RDT-UDP MUST use a fixed 12-byte header for all messages, followed by a variable
 *   `2 (DATA)`: Carries the actual file data chunk in the payload.
 *   `3 (ACK)`: Acknowledges successful receipt of a packet.
 *   `4 (FIN)`: Indicates no more data to send; initiates connection termination.
-*   `5 (FIN-ACK)`: Acknowledges the termination request. *(In this implementation, `ACK` is reused for FIN acknowledgment).*
+*   `5 (FIN-ACK)`: Acknowledges the termination request.
 *   `6 (ERROR)`: Indicates an error occurred (e.g., File Not Found). Payload contains the error description string.
 
 ## 4. State Machines
@@ -110,7 +110,12 @@ The sender MUST start a timer when a `DATA`, `SYN`, or `FIN` packet is transmitt
 *   **Session Mismatch:** Unrecognized `Session ID` packets MUST be ignored to prevent crossover.
 *   **Unresponsive Peers:** The Server SHOULD implement a stale session cleanup (drop inactive sessions after `TIMEOUT * 5` seconds).
 
-## 7. Protocol Termination
+## 7. File Transfer Operations
+
+*   **Download:** The Client sends a `SYN` packet with `DOWNLOAD|filename`. The Server locates the file in its operating directory and responds with `SYN-ACK`. The Server then reliably transmits `DATA` packets natively containing the binary file. The Client saves these to disk.
+*   **Upload:** The Client sends `SYN` with `UPLOAD|filename`. The Server creates a blank file in its operating directory. The Client transmits `DATA` packets containing the file. The Server writes received packets to the disk.
+
+## 8. End-of-file Signaling and Protocol Termination
 
 When a sender reads EOF:
 1.  It MUST send a `FIN` packet and start its timer.
