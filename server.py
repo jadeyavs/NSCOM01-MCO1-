@@ -58,7 +58,7 @@ class UDPServer:
                 
                 if packet.msg_type == TYPE_DATA:
                     self.handle_data(packet, addr, session)
-                elif packet.msg_type == TYPE_ACK:
+                elif packet.msg_type in (TYPE_ACK, TYPE_FIN_ACK):
                     self.handle_ack(packet, addr, session)
                 elif packet.msg_type == TYPE_FIN:
                     self.handle_fin(packet, addr, session)
@@ -200,7 +200,7 @@ class UDPServer:
         if session['op'] == 'UPLOAD':
             print(f"[*] Received FIN for upload session {packet.session_id}")
             # Acknowledge FIN
-            ack_pkt = Packet(TYPE_ACK, packet.seq_num, packet.session_id)
+            ack_pkt = Packet(TYPE_FIN_ACK, packet.seq_num, packet.session_id)
             self.sock.sendto(ack_pkt.to_bytes(), addr)
             
             # Close file and finish

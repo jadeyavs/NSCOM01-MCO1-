@@ -86,7 +86,7 @@ class UDPClient:
                              
                     elif packet.msg_type == TYPE_FIN:
                         print(f"[*] Received FIN. Closing connection.")
-                        ack_pkt = Packet(TYPE_ACK, packet.seq_num, self.session_id)
+                        ack_pkt = Packet(TYPE_FIN_ACK, packet.seq_num, self.session_id)
                         self.sock.sendto(ack_pkt.to_bytes(), self.server_addr)
                         print(f"[*] Download completed successfully.")
                         break
@@ -150,8 +150,8 @@ class UDPClient:
                 data, _ = self.sock.recvfrom(MAX_PAYLOAD_SIZE + HEADER_SIZE)
                 ack_pkt = Packet.from_bytes(data)
                 
-                if ack_pkt.session_id == self.session_id and ack_pkt.msg_type == TYPE_ACK and ack_pkt.seq_num == self.seq_num:
-                    print("[*] Received ACK for FIN. Upload complete.")
+                if ack_pkt.session_id == self.session_id and ack_pkt.msg_type == TYPE_FIN_ACK and ack_pkt.seq_num == self.seq_num:
+                    print("[*] Received FIN-ACK. Upload complete.")
                     break
             except socket.timeout:
                 print("[!] Timeout waiting for FIN ACK. Retransmitting FIN...")
