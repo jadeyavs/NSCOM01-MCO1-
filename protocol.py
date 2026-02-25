@@ -25,20 +25,15 @@ class Packet:
 
     def _calculate_checksum(self):
         """
-        Calculate a simple XOR checksum for the header and payload.
-        This provides basic data integrity checking.
+        Calculate an MD5-based checksum over the header and payload.
+        The digest is truncated to 1 byte to fit the packet's checksum field.
         """
         # Pack header without checksum
         header = struct.pack('!B I I H', self.msg_type, self.seq_num, self.session_id, self.payload_length)
-        
-        # Calculate XOR sum of all bytes in header + payload
-        checksum = 0
-        for b in header:
-            checksum ^= b
-        for b in self.payload:
-            checksum ^= b
-            
-        return checksum
+
+        # Compute MD5 over header + payload, take first byte
+        digest = hashlib.md5(header + self.payload).digest()
+        return digest[0]
 
     def to_bytes(self):
         """Serialize the packet to a byte string for network transmission."""
