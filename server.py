@@ -91,19 +91,20 @@ class UDPServer:
                 return
             
             print(f"[*] Starting DOWNLOAD for {secure_filename}, Session: {session_id}")
+            syn_ack_seq = packet.seq_num + 1
             self.sessions[session_id] = {
                 'addr': addr,
                 'state': 'TRANSFERRING',
                 'op': 'DOWNLOAD',
                 'file_obj': open(filepath, 'rb'),
-                'seq_num': packet.seq_num + 1,  # Server's seq number
+                'seq_num': syn_ack_seq,  # Server's current seq (SYN-ACK seq)
                 'last_acked_seq': packet.seq_num,
                 'unacked_packet': None,
                 'last_send_time': 0,
             }
             
             # Send SYN-ACK confirming we have the file
-            syn_ack = Packet(TYPE_SYN_ACK, packet.seq_num + 1, session_id, b"OK")
+            syn_ack = Packet(TYPE_SYN_ACK, syn_ack_seq, session_id, b"OK")
             self.sock.sendto(syn_ack.to_bytes(), addr)
             
             # Start sending first data packet immediately after SYN-ACK
@@ -117,6 +118,7 @@ class UDPServer:
                 'op': 'UPLOAD',
                 'file_obj': open(filepath, 'wb'),
                 'expected_seq': packet.seq_num + 1,
+                'recv_buffer': {},  # seq_num -> payload for out-of-order buffering
             }
             # Send SYN-ACK
             syn_ack = Packet(TYPE_SYN_ACK, packet.seq_num + 1, session_id, b"OK")
@@ -140,13 +142,13 @@ class UDPServer:
         
         if not data_chunk:
             # Reached EOF, initiate FIN
+            session['seq_num'] += 1
             print(f"[*] EOF reached for session {session_id}, sending FIN")
-            fin_pkt = Packet(TYPE_FIN, session['seq_num'] + 1, session_id)
+            fin_pkt = Packet(TYPE_FIN, session['seq_num'], session_id)
             self.sock.sendto(fin_pkt.to_bytes(), session['addr'])
             session['state'] = 'FIN_WAIT'
             session['unacked_packet'] = fin_pkt
             session['last_send_time'] = time.time()
-            session['seq_num'] += 1
             return
             
         # Create and send data packet
@@ -177,24 +179,31 @@ class UDPServer:
     def handle_data(self, packet, addr, session):
         # We handle DATA packets when we are UPLOADING (receiving file from client)
         if session['op'] == 'UPLOAD' and session['state'] == 'TRANSFERRING':
+            seq = packet.seq_num
+            expected = session['expected_seq']
             
-            # Check for ordered delivery (Stop-and-Wait)
-            if packet.seq_num == session['expected_seq']:
-                # Write to file
-                session['file_obj'].write(packet.payload)
+            if seq < expected:
+                # Duplicate packet — our ACK was probably lost; resend it
+                print(f"[!] Duplicate data pkt seq {seq}, resending ACK {seq}")
+                ack_pkt = Packet(TYPE_ACK, seq, packet.session_id)
+                self.sock.sendto(ack_pkt.to_bytes(), addr)
+                return
+
+            # Buffer this packet (may be in-order or ahead)
+            if seq not in session['recv_buffer']:
+                session['recv_buffer'][seq] = packet.payload
+
+            # Flush consecutive in-order packets from the buffer
+            while session['expected_seq'] in session['recv_buffer']:
+                payload = session['recv_buffer'].pop(session['expected_seq'])
+                session['file_obj'].write(payload)
                 session['expected_seq'] += 1
-                
-                # Send ACK
-                ack_pkt = Packet(TYPE_ACK, packet.seq_num, packet.session_id)
-                self.sock.sendto(ack_pkt.to_bytes(), addr)
-            elif packet.seq_num < session['expected_seq']:
-                # Received an older packet, likely meaning our previous ACK was lost.
-                # Resend ACK for the duplicate packet so the client can move on.
-                print(f"[!] Duplicate data pkt seq {packet.seq_num}, resending ACK")
-                ack_pkt = Packet(TYPE_ACK, packet.seq_num, packet.session_id)
-                self.sock.sendto(ack_pkt.to_bytes(), addr)
-            else:
-                 print(f"[!] Out of order packet seq {packet.seq_num} expected {session['expected_seq']}")
+
+            # Send cumulative ACK for the highest in-order seq delivered
+            ack_seq = session['expected_seq'] - 1
+            ack_pkt = Packet(TYPE_ACK, ack_seq, packet.session_id)
+            self.sock.sendto(ack_pkt.to_bytes(), addr)
+            print(f"[-] Sent cumulative ACK {ack_seq} (expected_seq now {session['expected_seq']})") 
 
     def handle_fin(self, packet, addr, session):
         if session['op'] == 'UPLOAD':

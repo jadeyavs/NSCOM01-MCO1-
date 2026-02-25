@@ -39,7 +39,9 @@ class UDPClient:
                     
                 if packet.msg_type == TYPE_SYN_ACK:
                     print(f"[*] Received SYN-ACK. Connection established.")
-                    self.seq_num = packet.seq_num # sync our expected sequence number? No, keep our own.
+                    # Store the server's SYN-ACK seq separately.
+                    # Client and server maintain independent sequence counters.
+                    self.server_seq = packet.seq_num
                     return True
                 elif packet.msg_type == TYPE_ERROR:
                     print(f"[!] Server Error: {packet.payload.decode('utf-8')}")
@@ -55,7 +57,9 @@ class UDPClient:
         if not self.connect("DOWNLOAD", filename):
             return
             
-        expected_seq = self.seq_num + 2 # SYN is +0, SYN-ACK is +1 (from server), first data is +2
+        # Server's first DATA packet has seq = server's SYN-ACK seq + 1.
+        # (Client and server have independent sequence counters.)
+        expected_seq = self.server_seq + 1
         
         with open("downloaded_" + os.path.basename(filename), 'wb') as f:
             while True:
@@ -102,43 +106,74 @@ class UDPClient:
                 except ValueError as e:
                     print(f"[!] Parsing error: {e}")
 
-    def upload_file(self, filename):
+    def upload_file(self, filename, window_size=4):
+        """Upload a file using a Go-Back-N sliding window (window_size packets in flight)."""
         if not os.path.exists(filename):
             print(f"[!] File not found: {filename}")
             return
             
-        print(f"[*] Starting upload of '{filename}'...")
+        print(f"[*] Starting upload of '{filename}' (window_size={window_size})...")
         if not self.connect("UPLOAD", os.path.basename(filename)):
             return
             
-        self.seq_num += 1 # Sequence for our first data packet
+        # Client's first data packet = SYN seq + 1 (our own counter, not server's).
+        # Server's expected_seq for upload is also packet.seq_num + 1 = SYN seq + 1. ✓
+        self.seq_num += 1  # First data packet = SYN seq + 1
         
+        # Read all chunks up-front (or lazily via a deque for large files)
         with open(filename, 'rb') as f:
+            chunks = []
             while True:
-                data_chunk = f.read(MAX_PAYLOAD_SIZE)
-                
-                if not data_chunk:
-                    # Send FIN
-                    self.send_fin()
+                chunk = f.read(MAX_PAYLOAD_SIZE)
+                if not chunk:
                     break
-                    
-                data_pkt = Packet(TYPE_DATA, self.seq_num, self.session_id, data_chunk)
+                chunks.append(chunk)
+        
+        total_chunks = len(chunks)
+        base = 0          # index of oldest unacknowledged packet
+        next_idx = 0      # index of next packet to send
+        base_seq = self.seq_num  # seq_num corresponding to chunks[0]
+        
+        # Pre-build all packets
+        packets = []
+        for i, chunk in enumerate(chunks):
+            packets.append(Packet(TYPE_DATA, base_seq + i, self.session_id, chunk))
+        
+        self.sock.settimeout(TIMEOUT)
+        last_send_time = time.time()
+        
+        while base < total_chunks:
+            # Fill the window — send any unsent packets within base..base+window_size
+            while next_idx < total_chunks and next_idx < base + window_size:
+                print(f"[>] Sending DATA seq {packets[next_idx].seq_num} ({next_idx+1}/{total_chunks})")
+                self.sock.sendto(packets[next_idx].to_bytes(), self.server_addr)
+                next_idx += 1
+            
+            if next_idx == base:
+                last_send_time = time.time()
+            
+            try:
+                data, _ = self.sock.recvfrom(MAX_PAYLOAD_SIZE + HEADER_SIZE)
+                ack_pkt = Packet.from_bytes(data)
                 
-                # Stop and wait logical loop
-                while True:
-                    self.sock.sendto(data_pkt.to_bytes(), self.server_addr)
-                    
-                    try:
-                        data, _ = self.sock.recvfrom(MAX_PAYLOAD_SIZE + HEADER_SIZE)
-                        ack_pkt = Packet.from_bytes(data)
+                if ack_pkt.session_id != self.session_id:
+                    continue
+                
+                if ack_pkt.msg_type == TYPE_ACK:
+                    acked_seq = ack_pkt.seq_num
+                    acked_idx = acked_seq - base_seq
+                    if 0 <= acked_idx < total_chunks and acked_idx >= base:
+                        base = acked_idx + 1  # Advance window base (cumulative ACK)
+                        last_send_time = time.time()
                         
-                        if ack_pkt.session_id != self.session_id: continue
-                        
-                        if ack_pkt.msg_type == TYPE_ACK and ack_pkt.seq_num == self.seq_num:
-                            self.seq_num += 1
-                            break # Move to next chunk
-                    except socket.timeout:
-                        print(f"[!] Timeout waiting for ACK {self.seq_num}. Retransmitting...")
+            except socket.timeout:
+                # Timeout: Go-Back-N — retransmit from base
+                print(f"[!] Timeout waiting for ACK {packets[base].seq_num}. Retransmitting from seq {packets[base].seq_num}...")
+                next_idx = base  # Reset next send pointer to window base
+        
+        # Update seq_num to after the last chunk
+        self.seq_num = base_seq + total_chunks
+        self.send_fin()
 
     def send_fin(self):
         fin_pkt = Packet(TYPE_FIN, self.seq_num, self.session_id)
